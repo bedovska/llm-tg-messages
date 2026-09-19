@@ -375,7 +375,6 @@ HTML_TEMPLATE = r"""<!doctype html>
 
 def read_source_messages(
     input_file: str,
-    id_column: str,
     text_column: str,
 ) -> list[dict[str, str]]:
     """Read source messages and validate the configured columns and IDs."""
@@ -384,7 +383,7 @@ def read_source_messages(
         reader = csv.DictReader(source)
         if not reader.fieldnames:
             raise ValueError(f"Source CSV has no header: {path}")
-        for column in (id_column, text_column):
+        for column in ("id", "source", text_column):
             if column not in reader.fieldnames:
                 raise ValueError(
                     f"Source CSV {path} has no {column!r} column"
@@ -393,15 +392,20 @@ def read_source_messages(
         rows: list[dict[str, str]] = []
         seen_ids: set[str] = set()
         for line_number, row in enumerate(reader, start=2):
-            message_id = str(row.get(id_column, ""))
-            if message_id in seen_ids:
+            current_message_id = message_id(row)
+            if current_message_id in seen_ids:
                 raise ValueError(
-                    f"Duplicate message ID {message_id!r} in {path} "
+                    f"Duplicate message ID {current_message_id!r} in {path} "
                     f"at line {line_number}"
                 )
-            seen_ids.add(message_id)
+            seen_ids.add(current_message_id)
             rows.append(row)
     return rows
+
+
+def message_id(row: dict[str, str]) -> str:
+    """Return the source-qualified Telegram message ID."""
+    return f"{row['source']}/{row['id']}"
 
 
 def read_results(results_file: str) -> dict[str, dict[str, Any]]:
@@ -445,19 +449,18 @@ def result_status(record: dict[str, Any] | None) -> str:
 def build_viewer_data(
     input_file: str,
     results_file: str,
-    id_column: str = "id",
     text_column: str = "text",
 ) -> dict[str, Any]:
     """Join source messages with results and prepare browser-safe data."""
-    rows = read_source_messages(input_file, id_column, text_column)
+    rows = read_source_messages(input_file, text_column)
     results = read_results(results_file)
-    source_ids = {str(row[id_column]) for row in rows}
+    source_ids = {message_id(row) for row in rows}
     subjects: set[str] = set()
     messages: list[dict[str, Any]] = []
 
     for row in rows:
-        message_id = str(row[id_column])
-        record = results.get(message_id)
+        current_message_id = message_id(row)
+        record = results.get(current_message_id)
         message_subjects: list[str] = []
         output = record.get("output") if record else None
         if isinstance(output, dict) and isinstance(output.get("subjects"), list):
@@ -468,7 +471,7 @@ def build_viewer_data(
                     subjects.add(subject_id)
         messages.append(
             {
-                "message_id": message_id,
+                "message_id": current_message_id,
                 "text": row.get(text_column, ""),
                 "original": row,
                 "result": record,
@@ -514,7 +517,6 @@ def create_app(viewer_data: dict[str, Any]) -> FastAPI:
 def serve(
     input_file: str,
     results_file: str,
-    id_column: str = "id",
     text_column: str = "text",
     host: str = "127.0.0.1",
     port: int = 8000,
@@ -524,7 +526,6 @@ def serve(
     Args:
         input_file: Source CSV containing the original Telegram messages.
         results_file: JSONL file produced by ``process_messages.py``.
-        id_column: CSV column containing the original message ID.
         text_column: CSV column containing the message text.
         host: Host interface for the local web server.
         port: Port for the local web server.
@@ -534,7 +535,6 @@ def serve(
     viewer_data = build_viewer_data(
         input_file,
         results_file,
-        id_column=id_column,
         text_column=text_column,
     )
     logger.info(

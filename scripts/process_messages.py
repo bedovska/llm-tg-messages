@@ -1,5 +1,6 @@
 """Classify Telegram messages with the OpenAI Responses API."""
 
+import asyncio
 import csv
 import hashlib
 import importlib.util
@@ -11,7 +12,7 @@ from typing import Any
 import fire
 from logkittt.core import add_handlers, get_logger
 from logkittt.handlers import DefaultConsoleHandler, DefaultFileHandler
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 from openai.lib._parsing._responses import type_to_text_format_param
 from openai.types.responses import Response
 from pydantic import BaseModel
@@ -59,7 +60,6 @@ def load_prompt(prompt_folder: str) -> tuple[str, type[BaseModel], str]:
 
 def read_messages(
     input_file: str,
-    id_column: str,
     text_column: str,
 ) -> list[dict[str, str]]:
     """Read and validate message rows from a CSV file."""
@@ -69,10 +69,15 @@ def read_messages(
         reader = csv.DictReader(source)
         if not reader.fieldnames:
             raise ValueError("input_file has no header")
-        for column in (id_column, text_column):
+        for column in ("id", "source", text_column):
             if column not in reader.fieldnames:
                 raise ValueError(f"input_file has no {column!r} column")
         return list(reader)
+
+
+def message_id(row: dict[str, str]) -> str:
+    """Return the source-qualified Telegram message ID."""
+    return f"{row['source']}/{row['id']}"
 
 
 def build_cache_key(
@@ -173,25 +178,23 @@ def write_jsonl_line(destination: Any, record: dict[str, Any]) -> None:
 
 
 class MessageProcessor:
-    """CLI commands for synchronous and Batch API processing."""
+    """CLI commands for asynchronous and Batch API processing."""
 
-    def process(
+    async def process(
         self,
         input_file: str,
         output_file: str,
         prompt_folder: str,
-        id_column: str = "id",
         text_column: str = "text",
         model: str = DEFAULT_MODEL,
         max_output_tokens: int = 4000,
     ) -> None:
-        """Process messages synchronously and write results as JSONL.
+        """Process messages asynchronously and write results as JSONL.
 
         Args:
             input_file: Source CSV containing Telegram messages.
             output_file: Destination JSONL path.
             prompt_folder: Folder containing the prompt and output schema.
-            id_column: CSV column containing the original message ID.
             text_column: CSV column containing the message text.
             model: OpenAI model ID.
             max_output_tokens: Maximum output tokens per response.
@@ -206,12 +209,52 @@ class MessageProcessor:
         instructions, output_model, prompt_version = load_prompt(
             prompt_folder
         )
-        rows = read_messages(input_file, id_column, text_column)
+        rows = read_messages(input_file, text_column)
         cache_key = build_cache_key(
             model, prompt_version, instructions, output_model
         )
-        client = OpenAI()
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        semaphore = asyncio.Semaphore(20)
+
+        async def process_row(
+            row: dict[str, str],
+        ) -> tuple[dict[str, Any], bool]:
+            current_message_id = message_id(row)
+            try:
+                async with semaphore:
+                    response = await client.responses.parse(
+                        model=model,
+                        instructions=instructions,
+                        input=row[text_column],
+                        text_format=output_model,
+                        reasoning={"effort": "none"},
+                        max_output_tokens=max_output_tokens,
+                        prompt_cache_key=cache_key,
+                        prompt_cache_options={
+                            "mode": "implicit",
+                            "ttl": "30m",
+                        },
+                        store=False,
+                    )
+                return (
+                    result_record(
+                        current_message_id,
+                        response,
+                        output_model,
+                        prompt_version,
+                    ),
+                    True,
+                )
+            except Exception as error:  # Continue long dataset runs.
+                logger.exception(
+                    "Failed to process message %s", current_message_id
+                )
+                return (
+                    error_record(
+                        current_message_id, prompt_version, model, error
+                    ),
+                    False,
+                )
 
         succeeded = 0
         failed = 0
@@ -221,35 +264,18 @@ class MessageProcessor:
             model,
             prompt_version,
         )
-        with output_path.open("w", encoding="utf-8") as destination:
-            for row in tqdm(rows, desc="Processing messages", unit="message"):
-                message_id = row[id_column]
-                try:
-                    response = client.responses.parse(
-                        model=model,
-                        instructions=instructions,
-                        input=row[text_column],
-                        text_format=output_model,
-                        reasoning={"effort": "none"},
-                        max_output_tokens=max_output_tokens,
-                        prompt_cache_key=cache_key,
-                        prompt_cache_options={"mode": "implicit", "ttl": "30m"},
-                        store=False,
-                    )
-                    record = result_record(
-                        message_id,
-                        response,
-                        output_model,
-                        prompt_version,
-                    )
-                    succeeded += 1
-                except Exception as error:  # Continue long dataset runs.
-                    logger.exception("Failed to process message %s", message_id)
-                    record = error_record(
-                        message_id, prompt_version, model, error
-                    )
-                    failed += 1
-                write_jsonl_line(destination, record)
+        async with AsyncOpenAI() as client:
+            tasks = [asyncio.create_task(process_row(row)) for row in rows]
+            with output_path.open("w", encoding="utf-8") as destination:
+                for task in tqdm(
+                    tasks, desc="Processing messages", unit="message"
+                ):
+                    record, was_successful = await task
+                    write_jsonl_line(destination, record)
+                    if was_successful:
+                        succeeded += 1
+                    else:
+                        failed += 1
 
         logger.info(
             "Finished processing: total=%d, succeeded=%d, failed=%d, output=%s",
@@ -263,7 +289,6 @@ class MessageProcessor:
         self,
         input_file: str,
         prompt_folder: str,
-        id_column: str = "id",
         text_column: str = "text",
         model: str = DEFAULT_MODEL,
         max_output_tokens: int = 4000,
@@ -273,7 +298,6 @@ class MessageProcessor:
         Args:
             input_file: Source CSV containing Telegram messages.
             prompt_folder: Folder containing the prompt and output schema.
-            id_column: CSV column containing the original message ID.
             text_column: CSV column containing the message text.
             model: OpenAI model ID.
             max_output_tokens: Maximum output tokens per response.
@@ -287,7 +311,7 @@ class MessageProcessor:
         instructions, output_model, prompt_version = load_prompt(
             prompt_folder
         )
-        rows = read_messages(input_file, id_column, text_column)
+        rows = read_messages(input_file, text_column)
         cache_key = build_cache_key(
             model, prompt_version, instructions, output_model
         )
@@ -306,8 +330,8 @@ class MessageProcessor:
             for index, row in enumerate(
                 tqdm(rows, desc="Preparing batch", unit="message")
             ):
-                message_id = row[id_column]
-                custom_id = f"{index}:{message_id}"
+                current_message_id = message_id(row)
+                custom_id = f"{index}:{current_message_id}"
                 if len(custom_id) > 64:
                     raise ValueError(
                         f"Batch custom_id exceeds 64 characters: {custom_id!r}"
@@ -330,7 +354,7 @@ class MessageProcessor:
                         },
                         "store": False,
                         "metadata": {
-                            "message_id": message_id,
+                            "message_id": current_message_id,
                             "prompt_version": prompt_version,
                         },
                     },
