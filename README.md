@@ -28,7 +28,7 @@
 потрібна змінна середовища `OPENAI_API_KEY`.
 
 <details>
-<summary><code>scripts/collect_test_dataset.py</code> — створення відтворюваної вибірки</summary>
+<summary><code>scripts/collect_test_dataset.py</code> — створення тестової вибірки</summary>
 
 Створює тестової вибірку зі 100 повідомлень з історичного CSV-файлу:
 
@@ -45,7 +45,7 @@ python scripts/collect_test_dataset.py \
 </details>
 
 <details>
-<summary><code>scripts/filter_irrelevant_messages.py</code> — видалення явно нерелевантних повідомлень</summary>
+<summary><code>scripts/filter_irrelevant_messages.py</code> — видалення нерелевантних повідомлень</summary>
 
 Фільтрує тестовий набір даних і, за потреби, зберігає відхилені рядки
 разом із причинами їх відхилення:
