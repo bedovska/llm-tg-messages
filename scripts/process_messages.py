@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import fire
+import httpx
 from logkittt.core import add_handlers, get_logger
 from logkittt.handlers import DefaultConsoleHandler, DefaultFileHandler
 from openai import AsyncOpenAI, OpenAI
@@ -264,7 +265,7 @@ class MessageProcessor:
             model,
             prompt_version,
         )
-        async with AsyncOpenAI() as client:
+        async with AsyncOpenAI(http_client=httpx.AsyncClient()) as client:
             tasks = [asyncio.create_task(process_row(row)) for row in rows]
             with output_path.open("w", encoding="utf-8") as destination:
                 for task in tqdm(
