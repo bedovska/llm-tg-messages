@@ -125,11 +125,41 @@ HTML_TEMPLATE = r"""<!doctype html>
     .badge.irrelevant { color: var(--irrelevant); }
     .badge.error { color: var(--error); background: #fff0ee; }
     .badge.missing { color: var(--missing); background: #fff4e8; }
-    .detail { min-width: 0; overflow-y: auto; padding: 24px clamp(18px, 4vw, 52px) 60px; }
-    .detail-inner { max-width: 1000px; margin: 0 auto; }
+    .detail {
+      --detail-gutter: clamp(18px, 4vw, 52px);
+      min-width: 0;
+      overflow-y: auto;
+      padding-bottom: 60px;
+    }
+    .detail-inner {
+      max-width: calc(1000px + clamp(36px, 8vw, 104px));
+      margin: 0 auto;
+    }
+    .detail-inner > .section {
+      margin-right: var(--detail-gutter);
+      margin-left: var(--detail-gutter);
+    }
+    .message-panel {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding: 24px var(--detail-gutter) 14px;
+      background: rgba(244, 246, 248, 0.5);
+    }
+    .message-heading {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 8px 16px;
+      align-items: center;
+    }
+    .message-heading h2 { margin-bottom: 0; }
+    .message-link { color: var(--accent); font-size: 13px; }
     .message-text {
       margin: 0;
       padding: 16px;
+      max-height: 36vh;
+      overflow-y: auto;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       background: var(--panel);
@@ -165,7 +195,8 @@ HTML_TEMPLATE = r"""<!doctype html>
     @media (max-width: 760px) {
       .layout { grid-template-columns: 1fr; height: auto; }
       .sidebar { height: 42vh; border-right: 0; border-bottom: 1px solid var(--border); }
-      .detail { overflow: visible; padding: 20px 14px 40px; }
+      .detail { --detail-gutter: 14px; overflow: visible; padding-bottom: 40px; }
+      .message-panel { padding-top: 20px; }
       .field { grid-template-columns: 1fr; gap: 3px; }
     }
   </style>
@@ -308,11 +339,25 @@ HTML_TEMPLATE = r"""<!doctype html>
       }
 
       const inner = makeElement("div", "detail-inner");
+      const messagePanel = makeElement("div", "message-panel");
+      const messageHeading = makeElement("div", "message-heading");
       const heading = makeElement("h2", "", `Message #${message.message_id}`);
       heading.append(" ", makeElement("span", `badge ${message.status}`, message.status));
-      inner.append(heading);
-      inner.append(makeElement("pre", "message-text", message.text || "(empty message)"));
-      appendDataSection(inner, "Original metadata", message.original, [viewerData.text_column]);
+      messageHeading.append(heading);
+
+      const sourceName = String(message.original.source || "").trim().replace(/^@/, "");
+      const sourceMessageId = String(message.original.id || "").trim();
+      if (sourceName && sourceMessageId) {
+        const link = makeElement("a", "message-link", "Open message in Telegram");
+        link.href = `https://t.me/${encodeURIComponent(sourceName)}/${encodeURIComponent(sourceMessageId)}`;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        messageHeading.append(link);
+      }
+
+      messagePanel.append(messageHeading);
+      messagePanel.append(makeElement("pre", "message-text", message.text || "(empty message)"));
+      inner.append(messagePanel);
 
       if (message.result) {
         const output = message.result.output;
@@ -339,6 +384,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         missing.append(makeElement("div", "empty", "No result was found for this message."));
         inner.append(missing);
       }
+      appendDataSection(inner, "Original metadata", message.original, [viewerData.text_column]);
       detailElement.append(inner);
     }
 
