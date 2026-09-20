@@ -159,3 +159,14 @@ python scripts/count_token_usage.py \
   --input_file=data/test/results.jsonl \
   --token_prices='[0.2,0.02,1.2]'
 ```
+
+</details>
+
+## Prompt engineering
+
+Правила створення та версіонування промптів описані в
+[`docs/prompt-guidelines.md`](docs/prompt-guidelines.md).
+
+Для створення наступної версії промпту на основі фідбеку використовуйте
+ скіл `$iterate-prompt-from-feedback`. Він зіставляє фідбек +
+тестові повідомленнями + результатами обробки, та пропонує наступну версію промпту.

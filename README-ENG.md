@@ -169,3 +169,15 @@ python scripts/count_token_usage.py \
   --input_file=data/test/results.jsonl \
   --token_prices='[0.2,0.02,1.2]'
 ```
+
+</details>
+
+## Prompt engineering
+
+Prompt structure and versioning rules are documented in
+[`docs/prompt-guidelines.md`](docs/prompt-guidelines.md).
+
+Use the repository skill `$iterate-prompt-from-feedback` to create the next
+prompt version from evaluation feedback. It matches feedback with test messages
+and processing results, proposes changes for review, and creates the next
+version only after separate approval.
