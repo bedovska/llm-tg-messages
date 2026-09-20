@@ -14,8 +14,8 @@ collect Telegram messages
 
 The project provides scripts for preparing a reproducible test dataset,
 filtering clearly irrelevant messages, processing messages with an LLM,
-reviewing the extracted data in a local web interface, and summarizing token
-usage.
+reviewing and annotating the extracted data in local web interfaces, and
+summarizing token usage.
 
 The local viewer displays the original Telegram messages alongside the
 structured LLM output and supports filtering by extracted subject.
@@ -112,6 +112,31 @@ python scripts/visualize_results.py \
 Open the URL printed by the script. The viewer joins source messages and LLM
 results by their source-qualified message IDs and shows relevant, irrelevant,
 failed, and missing results.
+
+</details>
+
+<details>
+<summary><code>scripts/annotate_results.py</code> — annotate results</summary>
+
+Start the separate feedback interface to add line-based notes and manually
+validate results:
+
+```bash
+python scripts/annotate_results.py \
+  --input_file=data/test/relevant.csv \
+  --results_file=data/test/results.jsonl \
+  --feedback_file=prompts/v3/feedback.md
+```
+
+The feedback file's directory must contain `shared-prompt.md` and
+`output_schema.py`. If the Markdown file does not exist, the annotator creates
+it with every source message. The sidebar separates messages into `TBD` and
+`Done` lists, and the subject filter applies to both lists.
+
+Each non-empty textarea line is stored as one Markdown bullet. `Validated` is
+stored as `status: [x]`, while an unchecked record uses `status: [ ]`. The
+Markdown file is the only persistent review state, so browser reloads pick up
+external file changes.
 
 </details>
 
