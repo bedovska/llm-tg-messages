@@ -133,6 +133,9 @@ The feedback file's directory must contain `shared-prompt.md` and
 it with every source message. The sidebar separates messages into `TBD` and
 `Done` lists, and the subject filter applies to both lists.
 
+Hotkeys: `↑`/`↓` move between messages, and `v` toggles validation. They are
+disabled while an input field has focus.
+
 Each non-empty textarea line is stored as one Markdown bullet. `Validated` is
 stored as `status: [x]`, while an unchecked record uses `status: [ ]`. The
 Markdown file is the only persistent review state, so browser reloads pick up

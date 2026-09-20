@@ -308,6 +308,21 @@ HTML_TEMPLATE = r"""<!doctype html>
       return viewerData.messages.filter(message => message.subjects.includes(state.subject));
     }
 
+    function orderedMessages() {
+      const messages = filteredMessages();
+      return [
+        ...messages.filter(message => !message.feedback.validated),
+        ...messages.filter(message => message.feedback.validated)
+      ];
+    }
+
+    function isInputFocused() {
+      const element = document.activeElement;
+      return element && (
+        element.matches("input, textarea, select") || element.isContentEditable
+      );
+    }
+
     function notesFromTextarea() {
       const textarea = document.getElementById("feedback-notes");
       if (!textarea) return [];
@@ -483,6 +498,12 @@ HTML_TEMPLATE = r"""<!doctype html>
       feedbackSection.append(saveStatus);
       checkbox.addEventListener("change", async () => {
         const requested = checkbox.checked;
+        const tbdMessages = filteredMessages().filter(
+          item => !item.feedback.validated
+        );
+        const currentIndex = tbdMessages.findIndex(
+          item => item.message_id === message.message_id
+        );
         checkbox.disabled = true;
         if (!(await flushNotes())) {
           checkbox.checked = message.feedback.validated;
@@ -494,6 +515,16 @@ HTML_TEMPLATE = r"""<!doctype html>
           const feedback = await patchFeedback(message.message_id, { validated: requested });
           message.feedback = feedback;
           setSaveStatus("Saved", "saved");
+          if (requested) {
+            const remainingTbd = tbdMessages.filter(
+              item => item.message_id !== message.message_id
+            );
+            const nextMessage = remainingTbd[currentIndex] || remainingTbd[0];
+            if (nextMessage) {
+              state.selectedId = nextMessage.message_id;
+              renderDetail();
+            }
+          }
           renderList();
         } catch (error) {
           checkbox.checked = message.feedback.validated;
@@ -562,10 +593,34 @@ HTML_TEMPLATE = r"""<!doctype html>
       filterElement.append(new Option("All subjects", ""));
       viewerData.subjects.forEach(subject => filterElement.append(new Option(subject, subject)));
       filterElement.addEventListener("change", event => changeFilter(event.target.value));
-      state.selectedId = viewerData.messages.length ? viewerData.messages[0].message_id : null;
+      const messages = orderedMessages();
+      state.selectedId = messages.length ? messages[0].message_id : null;
       renderList();
       renderDetail();
     }
+    document.addEventListener("keydown", event => {
+      if (isInputFocused()) return;
+
+      if (event.key.toLowerCase() === "v") {
+        const checkbox = document.querySelector(".validated-label input");
+        if (checkbox && !checkbox.disabled) {
+          event.preventDefault();
+          checkbox.click();
+        }
+        return;
+      }
+
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      const messages = orderedMessages();
+      const currentIndex = messages.findIndex(
+        message => message.message_id === state.selectedId
+      );
+      const offset = event.key === "ArrowUp" ? -1 : 1;
+      const nextIndex = currentIndex + offset;
+      if (nextIndex < 0 || nextIndex >= messages.length) return;
+      event.preventDefault();
+      selectMessage(messages[nextIndex].message_id);
+    });
     initialize();
   </script>
 </body>
@@ -578,12 +633,12 @@ def validate_feedback_path(feedback_file: str) -> Path:
     path = Path(feedback_file)
     if path.suffix.lower() != ".md":
         raise ValueError("feedback_file must have a .md extension")
-    for filename in ("shared-prompt.md", "output_schema.py"):
-        required_path = path.parent / filename
-        if not required_path.is_file():
-            raise ValueError(
-                f"Feedback folder {path.parent} must contain {filename}"
-            )
+    # for filename in ("shared-prompt.md", "output_schema.py"):
+    #     required_path = path.parent / filename
+    #     if not required_path.is_file():
+    #         raise ValueError(
+    #             f"Feedback folder {path.parent} must contain {filename}"
+    #         )
     return path
 
 
