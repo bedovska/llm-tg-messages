@@ -96,6 +96,18 @@ python scripts/process_messages.py collect_batch \
 Each JSONL record contains the source-qualified message ID, structured output,
 prompt version, model and response metadata, and token usage.
 
+The following errors may appear in the logs during asynchronous processing:
+
+- `RateLimitError` — the API request or token limit was reached; the script pauses.
+- `APITimeoutError` — the API did not respond before the timeout.
+- `SSLError` — the secure network connection was interrupted.
+- `APIConnectionError` — the API could not be reached, usually due to the network.
+- `ValidationError` — the model response did not match the expected structure.
+
+The script retries a failed request up to three times. If all attempts fail, the
+record has `output: null` and an `error` field, and the final log message reports
+the number of failed records.
+
 </details>
 
 <details>

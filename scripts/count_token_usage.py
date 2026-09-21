@@ -49,7 +49,7 @@ def empty_summary() -> dict[str, Any]:
 
 
 def add_usage(
-    summary: dict[str, Any], usage: dict[str, Any], line_number: int
+    summary: dict[str, Any], usage: dict[str, Any], location: str
 ) -> None:
     """Add one record's token fields to a summary."""
     token_values = {
@@ -62,39 +62,41 @@ def add_usage(
     for name, value in token_values.items():
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(
-                f"Line {line_number} has invalid usage.{name}: {value!r}"
+                f"{location} has invalid usage.{name}: {value!r}"
             )
         summary["token_usage"].setdefault(name, 0)
         summary["token_usage"][name] += value
     summary["records_with_usage"] += 1
 
 
-def summarize_usage(input_file: str) -> dict[str, Any]:
-    """Read a results JSONL file and return total usage."""
-    input_path = Path(input_file)
+def summarize_usage(input_files: tuple[str, ...]) -> dict[str, Any]:
+    """Read results JSONL files and return their combined usage."""
     total = empty_summary()
 
-    with input_path.open("r", encoding="utf-8") as source:
-        for line_number, line in enumerate(source, start=1):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise ValueError(
-                    f"Invalid JSON on line {line_number}: {error.msg}"
-                ) from error
-            if not isinstance(record, dict):
-                raise ValueError(f"Line {line_number} must contain an object")
+    for input_file in input_files:
+        input_path = Path(input_file)
+        with input_path.open("r", encoding="utf-8") as source:
+            for line_number, line in enumerate(source, start=1):
+                if not line.strip():
+                    continue
+                location = f"{input_path}, line {line_number}"
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        f"Invalid JSON in {location}: {error.msg}"
+                    ) from error
+                if not isinstance(record, dict):
+                    raise ValueError(f"{location} must contain an object")
 
-            usage = record.get("usage", {})
-            if not isinstance(usage, dict):
-                raise ValueError(
-                    f"Line {line_number} has a non-object usage value"
-                )
+                usage = record.get("usage", {})
+                if not isinstance(usage, dict):
+                    raise ValueError(
+                        f"{location} has a non-object usage value"
+                    )
 
-            total["records"] += 1
-            add_usage(total, usage, line_number)
+                total["records"] += 1
+                add_usage(total, usage, location)
 
     return total
 
@@ -189,24 +191,29 @@ def render_summary(summary: dict[str, Any]) -> str:
 
 
 def count_token_usage(
-    input_file: str,
+    *input_files: str,
     output_file: str | None = None,
     token_prices: list[float] | None = None,
 ) -> None:
-    """Summarize token usage and print or save it as JSON.
+    """Summarize token usage and print or save it as text.
 
     Args:
-        input_file: Message-processing results in JSONL format.
+        input_files: Message-processing results in JSONL format.
         output_file: Optional destination JSON file. Prints to stdout if omitted.
         token_prices: Optional per-million prices for input, cached input, and
             output tokens, in that order.
     """
-    input_path = Path(input_file)
-    output_path = Path(output_file) if output_file else None
-    if output_path and input_path.resolve() == output_path.resolve():
-        raise ValueError("input_file and output_file must differ")
+    if not input_files:
+        raise ValueError("At least one input file is required")
 
-    summary = summarize_usage(input_file)
+    output_path = Path(output_file) if output_file else None
+    if output_path and any(
+        Path(input_file).resolve() == output_path.resolve()
+        for input_file in input_files
+    ):
+        raise ValueError("Input files and output_file must differ")
+
+    summary = summarize_usage(input_files)
     if token_prices is not None:
         add_pricing(summary, token_prices)
 

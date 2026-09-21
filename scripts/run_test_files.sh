@@ -34,10 +34,12 @@ if (( ${#input_files[@]} == 0 )); then
 fi
 
 mkdir -p "$results_folder"
+result_files=()
 
 for input_file in "${input_files[@]}"; do
     dataset_name=$(basename "$input_file" .csv)
     output_file="$results_folder/$dataset_name.jsonl"
+    result_files+=("$output_file")
 
     if [[ -f $output_file ]]; then
         echo "Skipping $dataset_name: result already exists at $output_file"
@@ -49,7 +51,6 @@ for input_file in "${input_files[@]}"; do
         --input_file="$input_file" \
         --output_file="$output_file" \
         --prompt_folder="$prompt_folder"
-
-    python "$repo_root/scripts/count_token_usage.py" \
-        --input_file="$output_file"
 done
+
+python "$repo_root/scripts/count_token_usage.py" "${result_files[@]}" --token_prices="[0.2,0.02,1.2]"

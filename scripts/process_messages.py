@@ -14,11 +14,18 @@ from typing import Any
 import fire
 from logkittt.core import add_handlers, get_logger
 from logkittt.handlers import DefaultConsoleHandler, DefaultFileHandler
-from openai import AsyncOpenAI, OpenAI, RateLimitError
+from openai import (
+    AsyncOpenAI,
+    DefaultAioHttpClient,
+    OpenAI,
+    RateLimitError,
+    Timeout,
+)
 from openai.lib._parsing._responses import type_to_text_format_param
 from openai.types.responses import Response
 from pydantic import BaseModel
-from tqdm import tqdm
+
+import httpx
 
 
 logger = get_logger("could_llm_help", __name__)
@@ -184,6 +191,39 @@ def write_jsonl_line(destination: Any, record: dict[str, Any]) -> None:
     destination.flush()
 
 
+def format_duration(seconds: float) -> str:
+    """Format a duration as a compact human-readable value."""
+    total_seconds = max(0, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def log_progress(
+    label: str,
+    completed: int,
+    total: int,
+    started_at: float,
+) -> None:
+    """Log completed work, elapsed time, and estimated remaining time."""
+    elapsed = time.monotonic() - started_at
+    estimated_remaining = (
+        elapsed / completed * (total - completed) if completed else 0
+    )
+    logger.info(
+        "%s: %d/%d done; elapsed=%s; estimated remaining=%s",
+        label,
+        completed,
+        total,
+        format_duration(elapsed),
+        format_duration(estimated_remaining),
+    )
+
+
 def retry_after_seconds(error: Exception) -> float | None:
     """Return the server-requested retry delay for a rate-limit error."""
     if not isinstance(error, RateLimitError) or error.response is None:
@@ -253,7 +293,102 @@ class TokenRateLimiter:
 
 
 class MessageProcessor:
-    """CLI commands for asynchronous and Batch API processing."""
+    """CLI commands for synchronous, asynchronous, and Batch processing."""
+
+    def process_sync(
+        self,
+        input_file: str,
+        output_file: str,
+        prompt_folder: str,
+        text_column: str = "text",
+        model: str = DEFAULT_MODEL,
+        max_output_tokens: int = 4000,
+    ) -> None:
+        """Process messages synchronously and write results as JSONL.
+
+        Args:
+            input_file: Source CSV containing Telegram messages.
+            output_file: Destination JSONL path.
+            prompt_folder: Folder containing the prompt and output schema.
+            text_column: CSV column containing the message text.
+            model: OpenAI model ID.
+            max_output_tokens: Maximum output tokens per response.
+        """
+        input_path = Path(input_file)
+        output_path = Path(output_file)
+        if input_path.resolve() == output_path.resolve():
+            raise ValueError("input_file and output_file must differ")
+        if max_output_tokens < 1:
+            raise ValueError("max_output_tokens must be at least 1")
+
+        instructions, output_model, prompt_version = load_prompt(
+            prompt_folder
+        )
+        rows = read_messages(input_file, text_column)
+        cache_key = build_cache_key(
+            model, prompt_version, instructions, output_model
+        )
+        client = OpenAI(http_client=httpx.Client())
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        succeeded = 0
+        failed = 0
+        logger.info(
+            "Processing %d messages synchronously with model=%s prompt=%s",
+            len(rows),
+            model,
+            prompt_version,
+        )
+        started_at = time.monotonic()
+        with output_path.open("w", encoding="utf-8") as destination:
+            for completed, row in enumerate(rows, start=1):
+                current_message_id = message_id(row)
+                try:
+                    response = client.responses.parse(
+                        model=model,
+                        instructions=instructions,
+                        input=row[text_column],
+                        text_format=output_model,
+                        reasoning={"effort": "none"},
+                        max_output_tokens=max_output_tokens,
+                        prompt_cache_key=cache_key,
+                        prompt_cache_options={
+                            "mode": "implicit",
+                            "ttl": "30m",
+                        },
+                        store=False,
+                    )
+                    record = result_record(
+                        current_message_id,
+                        response,
+                        output_model,
+                        prompt_version,
+                    )
+                    succeeded += 1
+                except Exception as error:  # Continue long dataset runs.
+                    logger.exception(
+                        "Failed to process message %s", current_message_id
+                    )
+                    record = error_record(
+                        current_message_id, prompt_version, model, error
+                    )
+                    failed += 1
+                write_jsonl_line(destination, record)
+                log_progress(
+                    "Processing messages",
+                    completed,
+                    len(rows),
+                    started_at,
+                )
+
+        logger.info(
+            "Finished synchronous processing: total=%d, succeeded=%d, "
+            "failed=%d, output=%s",
+            len(rows),
+            succeeded,
+            failed,
+            output_path,
+        )
 
     async def process(
         self,
@@ -370,10 +505,12 @@ class MessageProcessor:
                         retry_delay = max(retry_delay, server_delay)
                     retry_delay += random.uniform(0, 0.25)
                     logger.warning(
-                        "Message %s failed with %s; retrying in %.2fs",
+                        "Message %s failed with %s on attempt %d/%d; "
+                        "retry scheduled",
                         current_message_id,
                         error_type,
-                        retry_delay,
+                        attempt,
+                        MAX_PROCESS_ATTEMPTS,
                     )
                     await asyncio.sleep(retry_delay)
                     continue
@@ -409,11 +546,18 @@ class MessageProcessor:
             tokens_per_minute,
             rate_limiter.effective_tokens_per_minute,
         )
-        async with AsyncOpenAI(max_retries=0) as client:
+        # async with AsyncOpenAI(max_retries=0) as client:
+        # async with AsyncOpenAI(max_retries=0, http_client=httpx.AsyncClient()) as client:
+        async with AsyncOpenAI(
+            max_retries=0,
+            timeout=Timeout(600.0, connect=30.0),
+            http_client=DefaultAioHttpClient(),
+        ) as client:
             tasks = [asyncio.create_task(process_row(row)) for row in rows]
+            started_at = time.monotonic()
             with output_path.open("w", encoding="utf-8") as destination:
-                for task in tqdm(
-                    tasks, desc="Processing messages", unit="message"
+                for completed, task in enumerate(
+                    asyncio.as_completed(tasks), start=1
                 ):
                     record, was_successful = await task
                     write_jsonl_line(destination, record)
@@ -421,6 +565,12 @@ class MessageProcessor:
                         succeeded += 1
                     else:
                         failed += 1
+                    log_progress(
+                        "Processing messages",
+                        completed,
+                        len(rows),
+                        started_at,
+                    )
 
         logger.info(
             "Finished processing: total=%d, succeeded=%d, failed=%d, "
@@ -463,7 +613,7 @@ class MessageProcessor:
             model, prompt_version, instructions, output_model
         )
         text_format = type_to_text_format_param(output_model)
-        client = OpenAI()
+        client = OpenAI(http_client=httpx.Client())
 
         logger.info(
             "Preparing batch of %d messages with model=%s prompt=%s",
@@ -474,9 +624,8 @@ class MessageProcessor:
         with tempfile.NamedTemporaryFile(
             mode="w+", encoding="utf-8", suffix=".jsonl"
         ) as batch_file:
-            for index, row in enumerate(
-                tqdm(rows, desc="Preparing batch", unit="message")
-            ):
+            started_at = time.monotonic()
+            for index, row in enumerate(rows):
                 current_message_id = message_id(row)
                 custom_id = f"{index}:{current_message_id}"
                 if len(custom_id) > 64:
@@ -507,6 +656,12 @@ class MessageProcessor:
                     },
                 }
                 batch_file.write(json.dumps(request, ensure_ascii=False) + "\n")
+                log_progress(
+                    "Preparing batch",
+                    index + 1,
+                    len(rows),
+                    started_at,
+                )
 
             batch_file.flush()
             batch_file.seek(0)
@@ -559,8 +714,9 @@ class MessageProcessor:
         logger.info(
             "Collecting %d results from batch_id=%s", len(lines), batch_id
         )
+        started_at = time.monotonic()
         with output_path.open("w", encoding="utf-8") as destination:
-            for line in tqdm(lines, desc="Collecting batch", unit="message"):
+            for completed, line in enumerate(lines, start=1):
                 item = json.loads(line)
                 custom_id = item.get("custom_id", "")
                 message_id = custom_id.split(":", 1)[-1]
@@ -593,6 +749,12 @@ class MessageProcessor:
                     )
                     failed += 1
                 write_jsonl_line(destination, record)
+                log_progress(
+                    "Collecting batch",
+                    completed,
+                    len(lines),
+                    started_at,
+                )
 
         logger.info(
             "Finished batch collection: total=%d, succeeded=%d, failed=%d, "

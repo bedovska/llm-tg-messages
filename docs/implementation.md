@@ -59,6 +59,13 @@ The implementation plan should be updated whenever code changes occur.
   `{relevant: false, subjects: []}` output. Results generated before the
   source-qualified ID change must be regenerated before visualization.
 
+  Both synchronous and asynchronous processing read the required `source`
+  and `id` input columns and write the same source-qualified `{source}/{id}`
+  message ID. For sequential requests, use:
+  `python scripts/process_messages.py process_sync`
+  `--input_file=data/test/relevant.csv --output_file=/tmp/results.jsonl`
+  `--prompt_folder=prompts/<version>`
+
   Asynchronous processing retries each failed message up to three times,
   including responses that fail Pydantic validation. Retry attempts produce
   concise warnings. If all attempts fail, the invalid result is stored as the
@@ -88,14 +95,15 @@ The implementation plan should be updated whenever code changes occur.
   `python scripts/process_messages.py collect_batch --batch_id=BATCH_ID`
   `--output_file=/tmp/results.jsonl --prompt_folder=prompts/<version>`
 
-  All commands show a `tqdm` progress bar. Runtime information and errors are
-  logged to both the console and `logs/process_messages.log`.
+  Commands log completed and total message counts together with elapsed and
+  estimated remaining time. Runtime information and errors are logged to both
+  the console and `logs/process_messages.log`.
 
   To process all test datasets of one size sequentially, use the lightweight
   shell runner. It accepts a prompt folder and an optional dataset size
   (`x100` by default), writes each result to the prompt's `results` folder,
-  skips result files that already exist, and prints token usage after every
-  newly processed dataset:
+  skips result files that already exist, and prints combined token usage for
+  all matching result files once processing finishes:
   `scripts/run_test_files.sh prompts/<version>`
   `scripts/run_test_files.sh prompts/<version> x1000`
 
@@ -141,17 +149,17 @@ The implementation plan should be updated whenever code changes occur.
   `--feedback_file=prompts/v3/feedback.md`
 
 - [x] Count token usage.
-  `scripts/count_token_usage.py` reads a processing-results JSONL file and sums
-  each token type separately. It prints a human-readable token count without
-  per-model details. Records with missing usage do not contribute to the
-  totals, and additional future fields ending in `_tokens` are collected
-  internally.
+  `scripts/count_token_usage.py` reads one or more processing-results JSONL
+  files and sums each token type across all of them. It prints a human-readable
+  token count without per-model details. Records with missing usage do not
+  contribute to the totals, and additional future fields ending in `_tokens`
+  are collected internally.
 
   Print the summary:
-  `python scripts/count_token_usage.py --input_file=data/test/results.jsonl`
+  `python scripts/count_token_usage.py results-1.jsonl results-2.jsonl`
 
   Or save the same plain-text summary to a file:
-  `python scripts/count_token_usage.py --input_file=data/test/results.jsonl`
+  `python scripts/count_token_usage.py results-1.jsonl results-2.jsonl`
   `--output_file=/tmp/token_usage.json`
 
   To calculate cost, pass per-million-token prices in the order regular input,
@@ -159,7 +167,7 @@ The implementation plan should be updated whenever code changes occur.
   count to avoid double charging. Cache-write tokens use the regular input
   price, and reasoning tokens are included in the output count. Costs are
   displayed as exact decimals in the same monetary unit as the prices:
-  `python scripts/count_token_usage.py --input_file=data/test/results.jsonl`
+  `python scripts/count_token_usage.py results-1.jsonl results-2.jsonl`
   `--token_prices=[0.2,0.02,1.2]`
 
 ## Project structure
