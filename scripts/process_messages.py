@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import fire
-import httpx
 from logkittt.core import add_handlers, get_logger
 from logkittt.handlers import DefaultConsoleHandler, DefaultFileHandler
 from openai import AsyncOpenAI, OpenAI
@@ -26,6 +25,8 @@ DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_LOG_FILE = str(
     Path(__file__).resolve().parents[1] / "logs" / "process_messages.log"
 )
+PROCESS_CONCURRENCY = 5
+MAX_PROCESS_ATTEMPTS = 3
 
 
 def load_prompt(prompt_folder: str) -> tuple[str, type[BaseModel], str]:
@@ -215,11 +216,11 @@ class MessageProcessor:
             model, prompt_version, instructions, output_model
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        semaphore = asyncio.Semaphore(20)
+        semaphore = asyncio.Semaphore(PROCESS_CONCURRENCY)
 
-        async def process_row(
+        async def process_once(
             row: dict[str, str],
-        ) -> tuple[dict[str, Any], bool]:
+        ) -> tuple[dict[str, Any], bool, Exception | None]:
             current_message_id = message_id(row)
             try:
                 async with semaphore:
@@ -245,17 +246,54 @@ class MessageProcessor:
                         prompt_version,
                     ),
                     True,
+                    None,
                 )
             except Exception as error:  # Continue long dataset runs.
-                logger.exception(
-                    "Failed to process message %s", current_message_id
-                )
                 return (
                     error_record(
                         current_message_id, prompt_version, model, error
                     ),
                     False,
+                    error,
                 )
+
+        async def process_row(
+            row: dict[str, str],
+        ) -> tuple[dict[str, Any], bool]:
+            for attempt in range(1, MAX_PROCESS_ATTEMPTS + 1):
+                record, was_successful, error = await process_once(row)
+                if was_successful:
+                    return record, True
+
+                error_type = record["error"]["type"]
+                current_message_id = message_id(row)
+                if attempt < MAX_PROCESS_ATTEMPTS:
+                    logger.warning(
+                        "Message %s failed with %s; retrying",
+                        current_message_id,
+                        error_type,
+                    )
+                    await asyncio.sleep(2 ** (attempt - 1))
+                    continue
+
+                if error is None:
+                    raise AssertionError("Failed attempt has no exception")
+                logger.logger.error(
+                    "Failed to process message %s after %d attempts",
+                    current_message_id,
+                    MAX_PROCESS_ATTEMPTS,
+                    exc_info=(type(error), error, error.__traceback__),
+                    extra={"file_only": True},
+                )
+                logger.warning(
+                    "Message %s failed with %s after %d attempts",
+                    current_message_id,
+                    error_type,
+                    MAX_PROCESS_ATTEMPTS,
+                )
+                return record, False
+
+            raise AssertionError("Processing attempts unexpectedly exhausted")
 
         succeeded = 0
         failed = 0
@@ -265,7 +303,7 @@ class MessageProcessor:
             model,
             prompt_version,
         )
-        async with AsyncOpenAI(http_client=httpx.AsyncClient()) as client:
+        async with AsyncOpenAI() as client:
             tasks = [asyncio.create_task(process_row(row)) for row in rows]
             with output_path.open("w", encoding="utf-8") as destination:
                 for task in tqdm(
@@ -464,9 +502,13 @@ class MessageProcessor:
 
 
 if __name__ == "__main__":
+    console_handler = DefaultConsoleHandler()
+    console_handler.addFilter(
+        lambda record: not getattr(record, "file_only", False)
+    )
     add_handlers(
         logger,
         __file__,
-        [DefaultConsoleHandler(), DefaultFileHandler(DEFAULT_LOG_FILE)],
+        [console_handler, DefaultFileHandler(DEFAULT_LOG_FILE)],
     )
     fire.Fire(MessageProcessor)

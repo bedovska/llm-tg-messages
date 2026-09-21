@@ -59,6 +59,12 @@ The implementation plan should be updated whenever code changes occur.
   `{relevant: false, subjects: []}` output. Results generated before the
   source-qualified ID change must be regenerated before visualization.
 
+  Asynchronous processing retries each failed message up to three times,
+  including responses that fail Pydantic validation. Retry attempts produce
+  concise warnings. If all attempts fail, the invalid result is stored as the
+  existing JSONL error record, a concise warning is shown in the console, and
+  the full final traceback is written only to the log file.
+
   Asynchronous processing uses the legacy HTTPX transport for stable TLS
   handling and allows up to 20 requests concurrently:
   `python scripts/process_messages.py process`
@@ -74,6 +80,14 @@ The implementation plan should be updated whenever code changes occur.
 
   All commands show a `tqdm` progress bar. Runtime information and errors are
   logged to both the console and `logs/process_messages.log`.
+
+  To process all test datasets of one size sequentially, use the lightweight
+  shell runner. It accepts a prompt folder and an optional dataset size
+  (`x100` by default), writes each result to the prompt's `results` folder,
+  skips result files that already exist, and prints token usage after every
+  newly processed dataset:
+  `scripts/run_test_files.sh prompts/<version>`
+  `scripts/run_test_files.sh prompts/<version> x1000`
 
 - [x] Visualize the results.
   - Create a simple web utility that shows results from the JSONL file alongside the original messages for manual validation.
