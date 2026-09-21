@@ -138,13 +138,6 @@ The implementation plan should be updated whenever code changes occur.
   `python scripts/count_token_usage.py --input_file=data/test/results.jsonl`
   `--token_prices=[0.2,0.02,1.2]`
 
-### Prompt guidelines
-- The shared prompt should begin with the role instruction.
-- Keep the role instruction in the shared prompt rather than hard-coding it in the processing script.
-
-
-
-
 ## Project structure
 - Python scripts should be stored under `./scripts`.
 - Shared prompts and the required output schema should be stored under `./prompts/`.
