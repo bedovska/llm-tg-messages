@@ -1,6 +1,6 @@
 ---
 name: iterate-prompt-from-feedback
-description: Analyze prompt feedback together with matched test messages and JSONL results, propose evidence-based improvements, and create the next version only after approval. Use when iterating prompts under prompts/v*/ from evaluation feedback.
+description: Analyze prompt feedback with matched test messages and JSONL results, propose evidence-based improvements, and create an approved next prompt version with a concise iteration note. Use when iterating prompts under prompts/v*/ from evaluation feedback.
 ---
 
 # Iterate Prompt From Feedback
@@ -73,12 +73,17 @@ After approval:
    `docs/prompt-guidelines.md`.
 2. Create exactly:
    - `shared-prompt.md` beginning with the role instruction;
-   - `output_schema.py` defining the Pydantic structured output.
-3. Base both files on the reviewed version and apply only agreed changes.
+   - `output_schema.py` defining the Pydantic structured output;
+   - `iterate-note.md` recording the evaluation basis, agreed changes, prompt
+     size before and after, validation results, and unresolved policy choices.
+3. Base the prompt and schema on the reviewed version and apply only agreed
+   changes.
 4. Preserve all earlier prompt versions unchanged.
-5. Do not create feedback, results, documentation, or migration files unless
-   separately requested and approved.
-6. Never commit changes.
+5. Keep `iterate-note.md` concise. Record join integrity and dataset basenames,
+   but do not copy message text or dump raw feedback into it.
+6. Do not create feedback, results, other documentation, or migration files
+   unless separately requested and approved.
+7. Never commit changes.
 
 ## Verify
 
@@ -87,5 +92,8 @@ After approval:
 - Confirm added and removed enum values match the agreement.
 - Check that the prompt follows `docs/prompt-guidelines.md` and that only the
   approved files changed.
+- Confirm `iterate-note.md` accurately records the completed analysis and
+  verification, including unavailable checks and any unresolved choice.
 - Run a non-mutating formatting or diff check when available.
-- Report created files, validation results, and any unresolved policy choice.
+- Report created files, prompt-size change, validation results, and any
+  unresolved policy choice.
