@@ -5,14 +5,16 @@ import csv
 import hashlib
 import importlib.util
 import json
+import random
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 import fire
 from logkittt.core import add_handlers, get_logger
 from logkittt.handlers import DefaultConsoleHandler, DefaultFileHandler
-from openai import AsyncOpenAI, OpenAI
+from openai import AsyncOpenAI, OpenAI, RateLimitError
 from openai.lib._parsing._responses import type_to_text_format_param
 from openai.types.responses import Response
 from pydantic import BaseModel
@@ -26,6 +28,9 @@ DEFAULT_LOG_FILE = str(
     Path(__file__).resolve().parents[1] / "logs" / "process_messages.log"
 )
 PROCESS_CONCURRENCY = 5
+DEFAULT_TOKENS_PER_MINUTE = 500_000
+TOKEN_RATE_UTILIZATION = 0.9
+INITIAL_TOKENS_PER_REQUEST = 3_200
 MAX_PROCESS_ATTEMPTS = 3
 
 
@@ -179,6 +184,74 @@ def write_jsonl_line(destination: Any, record: dict[str, Any]) -> None:
     destination.flush()
 
 
+def retry_after_seconds(error: Exception) -> float | None:
+    """Return the server-requested retry delay for a rate-limit error."""
+    if not isinstance(error, RateLimitError) or error.response is None:
+        return None
+
+    value = error.response.headers.get("retry-after")
+    if value is None:
+        return None
+
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
+
+
+class TokenRateLimiter:
+    """Evenly pace requests under a configured token-per-minute limit."""
+
+    def __init__(self, tokens_per_minute: int) -> None:
+        self.effective_tokens_per_minute = max(
+            1,
+            int(tokens_per_minute * TOKEN_RATE_UTILIZATION),
+        )
+        self._seconds_per_token = 60 / self.effective_tokens_per_minute
+        self._estimated_tokens = INITIAL_TOKENS_PER_REQUEST
+        self._next_request_at = 0.0
+        self._lock = asyncio.Lock()
+        self.rate_limit_events = 0
+
+    async def acquire(self) -> int:
+        """Reserve estimated token capacity and wait until it is available."""
+        async with self._lock:
+            now = time.monotonic()
+            request_at = max(now, self._next_request_at)
+            reserved_tokens = self._estimated_tokens
+            self._next_request_at = request_at + (
+                reserved_tokens * self._seconds_per_token
+            )
+
+        delay = request_at - now
+        if delay > 0:
+            await asyncio.sleep(delay)
+        return reserved_tokens
+
+    async def reconcile(self, reserved_tokens: int, actual_tokens: int) -> None:
+        """Adjust future capacity using the completed request's usage."""
+        async with self._lock:
+            adjustment = actual_tokens - reserved_tokens
+            self._next_request_at = max(
+                time.monotonic(),
+                self._next_request_at
+                + adjustment * self._seconds_per_token,
+            )
+            self._estimated_tokens = max(
+                1,
+                round(0.8 * self._estimated_tokens + 0.2 * actual_tokens),
+            )
+
+    async def pause(self, delay: float) -> None:
+        """Pause all new requests after a rate-limit response."""
+        async with self._lock:
+            self.rate_limit_events += 1
+            self._next_request_at = max(
+                self._next_request_at,
+                time.monotonic() + delay,
+            )
+
+
 class MessageProcessor:
     """CLI commands for asynchronous and Batch API processing."""
 
@@ -190,6 +263,8 @@ class MessageProcessor:
         text_column: str = "text",
         model: str = DEFAULT_MODEL,
         max_output_tokens: int = 4000,
+        concurrency: int = PROCESS_CONCURRENCY,
+        tokens_per_minute: int = DEFAULT_TOKENS_PER_MINUTE,
     ) -> None:
         """Process messages asynchronously and write results as JSONL.
 
@@ -200,6 +275,8 @@ class MessageProcessor:
             text_column: CSV column containing the message text.
             model: OpenAI model ID.
             max_output_tokens: Maximum output tokens per response.
+            concurrency: Maximum number of simultaneous API requests.
+            tokens_per_minute: API token-per-minute limit used for pacing.
         """
         input_path = Path(input_file)
         output_path = Path(output_file)
@@ -207,6 +284,10 @@ class MessageProcessor:
             raise ValueError("input_file and output_file must differ")
         if max_output_tokens < 1:
             raise ValueError("max_output_tokens must be at least 1")
+        if concurrency < 1:
+            raise ValueError("concurrency must be at least 1")
+        if tokens_per_minute < 1:
+            raise ValueError("tokens_per_minute must be at least 1")
 
         instructions, output_model, prompt_version = load_prompt(
             prompt_folder
@@ -216,7 +297,8 @@ class MessageProcessor:
             model, prompt_version, instructions, output_model
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        semaphore = asyncio.Semaphore(PROCESS_CONCURRENCY)
+        semaphore = asyncio.Semaphore(concurrency)
+        rate_limiter = TokenRateLimiter(tokens_per_minute)
 
         async def process_once(
             row: dict[str, str],
@@ -224,6 +306,7 @@ class MessageProcessor:
             current_message_id = message_id(row)
             try:
                 async with semaphore:
+                    reserved_tokens = await rate_limiter.acquire()
                     response = await client.responses.parse(
                         model=model,
                         instructions=instructions,
@@ -238,6 +321,11 @@ class MessageProcessor:
                         },
                         store=False,
                     )
+                    if response.usage is not None:
+                        await rate_limiter.reconcile(
+                            reserved_tokens,
+                            response.usage.total_tokens,
+                        )
                 return (
                     result_record(
                         current_message_id,
@@ -267,13 +355,27 @@ class MessageProcessor:
 
                 error_type = record["error"]["type"]
                 current_message_id = message_id(row)
+                server_delay = (
+                    retry_after_seconds(error)
+                    if error is not None
+                    else None
+                )
+                if isinstance(error, RateLimitError):
+                    pause_delay = server_delay or 2 ** (attempt - 1)
+                    await rate_limiter.pause(pause_delay)
+
                 if attempt < MAX_PROCESS_ATTEMPTS:
+                    retry_delay = 2 ** (attempt - 1)
+                    if server_delay is not None:
+                        retry_delay = max(retry_delay, server_delay)
+                    retry_delay += random.uniform(0, 0.25)
                     logger.warning(
-                        "Message %s failed with %s; retrying",
+                        "Message %s failed with %s; retrying in %.2fs",
                         current_message_id,
                         error_type,
+                        retry_delay,
                     )
-                    await asyncio.sleep(2 ** (attempt - 1))
+                    await asyncio.sleep(retry_delay)
                     continue
 
                 if error is None:
@@ -298,12 +400,16 @@ class MessageProcessor:
         succeeded = 0
         failed = 0
         logger.info(
-            "Processing %d messages with model=%s prompt=%s",
+            "Processing %d messages with model=%s prompt=%s "
+            "concurrency=%d tokens_per_minute=%d effective_tpm=%d",
             len(rows),
             model,
             prompt_version,
+            concurrency,
+            tokens_per_minute,
+            rate_limiter.effective_tokens_per_minute,
         )
-        async with AsyncOpenAI() as client:
+        async with AsyncOpenAI(max_retries=0) as client:
             tasks = [asyncio.create_task(process_row(row)) for row in rows]
             with output_path.open("w", encoding="utf-8") as destination:
                 for task in tqdm(
@@ -317,10 +423,12 @@ class MessageProcessor:
                         failed += 1
 
         logger.info(
-            "Finished processing: total=%d, succeeded=%d, failed=%d, output=%s",
+            "Finished processing: total=%d, succeeded=%d, failed=%d, "
+            "rate_limit_events=%d, output=%s",
             len(rows),
             succeeded,
             failed,
+            rate_limiter.rate_limit_events,
             output_path,
         )
 

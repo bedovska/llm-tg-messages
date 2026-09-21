@@ -65,11 +65,21 @@ The implementation plan should be updated whenever code changes occur.
   existing JSONL error record, a concise warning is shown in the console, and
   the full final traceback is written only to the log file.
 
-  Asynchronous processing uses the legacy HTTPX transport for stable TLS
-  handling and allows up to 20 requests concurrently:
+  Asynchronous processing allows up to five requests concurrently by default.
+  It also spaces request starts to use 90% of the configured token-per-minute
+  limit, leaving headroom for token variation and other API activity. Both
+  controls can be changed independently with `--concurrency` and
+  `--tokens_per_minute`:
   `python scripts/process_messages.py process`
   `--input_file=data/test/relevant.csv --output_file=/tmp/results.jsonl`
-  `--prompt_folder=prompts/<version>`
+  `--prompt_folder=prompts/<version> --concurrency=5`
+  `--tokens_per_minute=500000`
+
+  Request pacing starts with a conservative token estimate and adjusts it from
+  completed response usage. Rate-limit responses pause new requests, honor the
+  server's `Retry-After` value when available, and otherwise use exponential
+  backoff with a small random delay. SDK retries are disabled so the three
+  application-level attempts are the complete retry budget.
 
   Batch processing is split into submission and collection because OpenAI runs
   a batch asynchronously. Save the batch ID printed by the first command:
